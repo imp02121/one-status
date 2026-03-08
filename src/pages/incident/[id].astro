@@ -2,7 +2,14 @@
 import BaseLayout from '../../layouts/BaseLayout.astro';
 import Header from '../../components/Header.astro';
 import Footer from '../../components/Footer.astro';
-import { fetchIncident } from '../../lib/api';
+import { fetchIncident, fetchIncidents } from '../../lib/api';
+
+export async function getStaticPaths() {
+  const data = await fetchIncidents(1, 100);
+  return data.incidents.map((incident) => ({
+    params: { id: incident.id },
+  }));
+}
 
 const { id } = Astro.params;
 const data = id ? await fetchIncident(id) : null;
