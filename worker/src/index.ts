@@ -16,6 +16,7 @@ import { unsubscribeRoutes } from "./routes/unsubscribe";
 import { adminSubscriberRoutes } from "./routes/admin-subscribers";
 import { adminConfigRoutes } from "./routes/admin-config";
 import { pingRoutes } from "./routes/ping";
+import { rssRoutes } from "./routes/rss";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -49,6 +50,7 @@ app.use(
   cors({
     origin: [
       "https://status.bundlenudge.com",
+      "http://localhost:5173",
       "http://localhost:4321",
       "http://localhost:3000",
     ],
@@ -67,6 +69,7 @@ app.route("/api", unsubscribeRoutes);
 app.route("/api", adminSubscriberRoutes);
 app.route("/api", adminConfigRoutes);
 app.route("/api", pingRoutes);
+app.route("/api", rssRoutes);
 
 // Catch-all 404
 app.notFound((c) => c.json({ error: "Not found" }, 404));

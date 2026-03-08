@@ -1,9 +1,6 @@
----
-interface Props {
+interface StatusBadgeProps {
   status: 'operational' | 'degraded' | 'outage' | 'unknown';
 }
-
-const { status } = Astro.props;
 
 const config = {
   operational: {
@@ -32,14 +29,18 @@ const config = {
   },
 } as const;
 
-const { label, dotClass, bgClass, textClass } = config[status];
----
-<div class:list={['flex items-center justify-center gap-3 rounded-xl border px-6 py-5', bgClass]}>
-  <span class="relative flex h-3 w-3">
-    {status === 'operational' && (
-      <span class:list={['absolute inline-flex h-full w-full animate-ping rounded-full opacity-75', dotClass]} />
-    )}
-    <span class:list={['relative inline-flex h-3 w-3 rounded-full', dotClass]} />
-  </span>
-  <span class:list={['text-lg font-semibold', textClass]}>{label}</span>
-</div>
+export function StatusBadge({ status }: StatusBadgeProps) {
+  const { label, dotClass, bgClass, textClass } = config[status];
+
+  return (
+    <div className={`flex items-center justify-center gap-3 rounded-xl border px-6 py-5 ${bgClass}`}>
+      <span className="relative flex h-3 w-3">
+        {status === 'operational' && (
+          <span className={`absolute inline-flex h-full w-full animate-ping rounded-full opacity-75 ${dotClass}`} />
+        )}
+        <span className={`relative inline-flex h-3 w-3 rounded-full ${dotClass}`} />
+      </span>
+      <span className={`text-lg font-semibold ${textClass}`}>{label}</span>
+    </div>
+  );
+}

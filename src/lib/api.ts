@@ -1,6 +1,14 @@
-import { SERVICE_DISPLAY_NAMES } from '../../shared/constants';
+const SERVICE_DISPLAY_NAMES: Record<string, string> = {
+  api: 'API',
+  dashboard: 'Dashboard',
+  authentication: 'Authentication',
+  'edge-delivery': 'Edge Delivery',
+  'ota-updates': 'OTA Updates',
+  'build-service': 'Build Service',
+  documentation: 'Documentation',
+};
 
-const API_BASE = import.meta.env.PUBLIC_STATUS_API_URL || 'https://status-api.bundlenudge.com';
+const API_BASE = import.meta.env.VITE_API_URL || 'https://status.bundlenudge.com';
 
 interface UptimeDay {
   date: string;

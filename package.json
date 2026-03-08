@@ -1,7 +1,7 @@
 {
   "name": "@bundlenudge/status-page",
   "version": "0.1.0",
-  "description": "Open-source status page built with Astro and Cloudflare Workers",
+  "description": "Open-source status page built with Vite + React and Cloudflare Workers",
   "private": true,
   "type": "module",
   "license": "BSL-1.1",
@@ -19,29 +19,36 @@
     "uptime",
     "monitoring",
     "cloudflare-workers",
-    "astro"
+    "vite",
+    "react"
   ],
   "engines": {
     "node": ">=18"
   },
   "scripts": {
-    "dev": "astro dev",
-    "build": "astro build",
-    "preview": "astro preview",
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
     "test": "cd worker && npm test && cd ../sdk && npm test",
-    "typecheck": "cd worker && npm run typecheck && cd ../sdk && npm run typecheck",
+    "typecheck": "tsc --noEmit && cd worker && npm run typecheck && cd ../sdk && npm run typecheck",
     "test:worker": "cd worker && npm test",
     "test:sdk": "cd sdk && npm test"
   },
   "dependencies": {
-    "@astrojs/rss": "^4.0.15",
-    "@astrojs/sitemap": "^3.7.0",
-    "@astrojs/tailwind": "^6.0.2",
-    "@tailwindcss/typography": "^0.5.19",
-    "astro": "^5.18.0",
-    "tailwindcss": "^3.4.19"
+    "@tanstack/react-query": "^5.90.21",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "react-router": "^7.13.1"
   },
   "devDependencies": {
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.4",
+    "autoprefixer": "^10.4.27",
+    "postcss": "^8.5.8",
+    "tailwindcss": "^3.4.19",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1",
     "vitest": "^4.0.18"
   }
 }

@@ -2,18 +2,19 @@ name = "bundlenudge-status"
 main = "src/index.ts"
 compatibility_date = "2024-12-01"
 compatibility_flags = ["nodejs_compat"]
+workers_dev = true
 
 [triggers]
 crons = ["*/5 * * * *"]
 
 [[kv_namespaces]]
 binding = "STATUS_KV"
-id = "TO_BE_CREATED"
+id = "0ee260c1d18d47c599245d92c48a0241"
 
 [[d1_databases]]
 binding = "STATUS_DB"
 database_name = "bundlenudge-status-db"
-database_id = "TO_BE_CREATED"
+database_id = "8b01871c-1cf5-461e-bce5-19576bd93092"
 
 [vars]
 ENVIRONMENT = "production"
