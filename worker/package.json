@@ -1,0 +1,49 @@
+{
+  "name": "@bundlenudge/status-worker",
+  "version": "0.1.0",
+  "description": "Cloudflare Worker for status page health checks and API",
+  "private": true,
+  "license": "BSL-1.1",
+  "author": "BundleNudge <hello@bundlenudge.com>",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/imp02121/one-status.git",
+    "directory": "worker"
+  },
+  "homepage": "https://github.com/imp02121/one-status#readme",
+  "bugs": {
+    "url": "https://github.com/imp02121/one-status/issues"
+  },
+  "keywords": [
+    "status-page",
+    "cloudflare-workers",
+    "health-check",
+    "uptime-monitoring",
+    "hono"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:mutate": "stryker run",
+    "test:mutate:incremental": "stryker run --incremental",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "hono": "^4.7.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250224.0",
+    "@stryker-mutator/core": "^9.6.0",
+    "@stryker-mutator/typescript-checker": "^9.6.0",
+    "@stryker-mutator/vitest-runner": "^9.6.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0",
+    "wrangler": "^4.0.0"
+  }
+}

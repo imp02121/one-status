@@ -1,0 +1,47 @@
+{
+  "name": "@bundlenudge/status-page",
+  "version": "0.1.0",
+  "description": "Open-source status page built with Astro and Cloudflare Workers",
+  "private": true,
+  "type": "module",
+  "license": "BSL-1.1",
+  "author": "BundleNudge <hello@bundlenudge.com>",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/imp02121/one-status.git"
+  },
+  "homepage": "https://github.com/imp02121/one-status#readme",
+  "bugs": {
+    "url": "https://github.com/imp02121/one-status/issues"
+  },
+  "keywords": [
+    "status-page",
+    "uptime",
+    "monitoring",
+    "cloudflare-workers",
+    "astro"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "test": "cd worker && npm test && cd ../sdk && npm test",
+    "typecheck": "cd worker && npm run typecheck && cd ../sdk && npm run typecheck",
+    "test:worker": "cd worker && npm test",
+    "test:sdk": "cd sdk && npm test"
+  },
+  "dependencies": {
+    "@astrojs/rss": "^4.0.15",
+    "@astrojs/sitemap": "^3.7.0",
+    "@astrojs/tailwind": "^6.0.2",
+    "@tailwindcss/typography": "^0.5.19",
+    "astro": "^5.18.0",
+    "tailwindcss": "^3.4.19"
+  },
+  "devDependencies": {
+    "vitest": "^4.0.18"
+  }
+}
