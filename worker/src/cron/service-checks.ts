@@ -7,6 +7,7 @@ import type {
   HealthCheckResult,
   ApiHealthResponse,
   StatusPageConfig,
+  TenantService,
 } from "../types";
 import { fetchWithTimeout, TimeoutError } from "../lib/fetch-timeout";
 
@@ -177,4 +178,106 @@ function deriveFromApi(
     latencyMs: apiResult.latencyMs,
     checkedAt,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Tenant service check result (arbitrary slugs, not ServiceName)
+// ---------------------------------------------------------------------------
+
+export interface TenantCheckResult {
+  slug: string;
+  status: ServiceStatus;
+  latencyMs: number;
+  checkedAt: string;
+  error?: string;
+}
+
+/** Run health checks for a tenant's services from DB config */
+export async function runTenantServiceChecks(
+  services: TenantService[],
+  now: Date,
+): Promise<TenantCheckResult[]> {
+  const checkedAt = now.toISOString();
+
+  const checks = await Promise.all(
+    services.map(async (svc) => {
+      if (svc.checkType === "deep-health") {
+        return checkTenantDeepHealth(svc.slug, svc.url, checkedAt);
+      }
+      return checkTenantHead(svc.slug, svc.url, checkedAt);
+    }),
+  );
+
+  return checks;
+}
+
+async function checkTenantHead(
+  slug: string,
+  url: string,
+  checkedAt: string,
+): Promise<TenantCheckResult> {
+  const start = Date.now();
+  try {
+    const response = await fetchWithTimeout(url, {
+      method: "HEAD",
+      timeoutMs: CHECK_TIMEOUT_MS,
+    });
+    const latencyMs = Date.now() - start;
+    const status: ServiceStatus = response.ok ? "operational" : "down";
+
+    return {
+      slug,
+      status,
+      latencyMs,
+      checkedAt,
+      error: response.ok ? undefined : `HTTP ${String(response.status)}`,
+    };
+  } catch (err: unknown) {
+    return {
+      slug,
+      status: "down",
+      latencyMs: Date.now() - start,
+      checkedAt,
+      error: err instanceof TimeoutError ? "timeout" : String(err),
+    };
+  }
+}
+
+async function checkTenantDeepHealth(
+  slug: string,
+  url: string,
+  checkedAt: string,
+): Promise<TenantCheckResult> {
+  const start = Date.now();
+  try {
+    const response = await fetchWithTimeout(url, {
+      method: "GET",
+      timeoutMs: CHECK_TIMEOUT_MS,
+    });
+    const latencyMs = Date.now() - start;
+
+    if (!response.ok) {
+      return {
+        slug,
+        status: "down",
+        latencyMs,
+        checkedAt,
+        error: `HTTP ${String(response.status)}`,
+      };
+    }
+
+    const data = (await response.json()) as ApiHealthResponse;
+    const status: ServiceStatus =
+      data.status === "healthy" ? "operational" : "degraded";
+
+    return { slug, status, latencyMs, checkedAt };
+  } catch (err: unknown) {
+    return {
+      slug,
+      status: "down",
+      latencyMs: Date.now() - start,
+      checkedAt,
+      error: err instanceof TimeoutError ? "timeout" : String(err),
+    };
+  }
 }

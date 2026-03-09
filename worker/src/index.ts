@@ -17,6 +17,7 @@ import { adminSubscriberRoutes } from "./routes/admin-subscribers";
 import { adminConfigRoutes } from "./routes/admin-config";
 import { pingRoutes } from "./routes/ping";
 import { rssRoutes } from "./routes/rss";
+import { resolveTenant } from "./middleware/tenant-resolution";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -48,17 +49,27 @@ app.use("/api/*", async (c, next) => {
 app.use(
   "/api/*",
   cors({
-    origin: [
-      "https://status.bundlenudge.com",
-      "http://localhost:5173",
-      "http://localhost:4321",
-      "http://localhost:3000",
-    ],
+    origin: (origin) => {
+      const allowed = [
+        "https://status.bundlenudge.com",
+        "http://localhost:5173",
+        "http://localhost:4321",
+        "http://localhost:3000",
+      ];
+      // Allow *.one-status.pages.dev (Cloudflare Pages preview/prod)
+      if (origin.endsWith(".one-status.pages.dev") || origin === "https://one-status.pages.dev") {
+        return origin;
+      }
+      return allowed.includes(origin) ? origin : allowed[0];
+    },
     allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
-    allowHeaders: ["Content-Type", "Authorization"],
+    allowHeaders: ["Content-Type", "Authorization", "X-Tenant-Slug"],
     maxAge: 86400,
   }),
 );
+
+// Tenant resolution — extract tenant from Host/subdomain/header
+app.use("/api/*", resolveTenant);
 
 // Mount API routes
 app.route("/api", statusRoutes);

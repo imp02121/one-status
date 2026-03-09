@@ -1,12 +1,31 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Hono } from "hono";
-import type { Env } from "../types";
+import type { Env, Tenant } from "../types";
 import { KV_KEYS } from "../types";
 import { adminConfigRoutes } from "./admin-config";
-import { createMockEnv } from "../test-helpers";
+import { createMockEnv, mockTenant } from "../test-helpers";
+
+const TEST_TENANT = mockTenant();
+const TEST_API_KEY = "test-api-key";
+let TEST_API_KEY_HASH: string;
+
+async function computeHash(token: string): Promise<string> {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(token);
+  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+  const hashArray = new Uint8Array(hashBuffer);
+  return Array.from(hashArray)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
 
 function createApp(env: Env) {
-  const app = new Hono<{ Bindings: Env }>();
+  const app = new Hono<{ Bindings: Env; Variables: { tenant: Tenant } }>();
+  // Inject tenant context for tests
+  app.use("/api/*", async (c, next) => {
+    c.set("tenant", TEST_TENANT);
+    return next();
+  });
   // Match production content-type middleware
   app.use("/api/*", async (c, next) => {
     const method = c.req.method;
@@ -22,7 +41,35 @@ function createApp(env: Env) {
   return { app, env };
 }
 
-const AUTH_HEADER = { Authorization: "Bearer test-admin-key-secret" };
+const AUTH_HEADER = { Authorization: `Bearer ${TEST_API_KEY}` };
+
+function mockD1ForApiKey(env: Env) {
+  vi.mocked(env.STATUS_DB.prepare).mockImplementation((query: string) => {
+    const stmt = {
+      bind: vi.fn().mockReturnThis(),
+      first: vi.fn().mockImplementation(async () => {
+        if (query.includes("api_keys")) {
+          return {
+            id: "key-1",
+            tenant_id: TEST_TENANT.id,
+            name: "Test Key",
+            key_hash: TEST_API_KEY_HASH,
+            key_prefix: "test",
+            scopes: '["config:write"]',
+            last_used_at: null,
+            expires_at: null,
+            created_at: "2026-01-01T00:00:00Z",
+          };
+        }
+        return null;
+      }),
+      all: vi.fn().mockResolvedValue({ results: [] }),
+      run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 1 } }),
+      raw: vi.fn().mockResolvedValue([]),
+    };
+    return stmt as unknown as D1PreparedStatement;
+  });
+}
 
 function validConfig() {
   return {
@@ -52,10 +99,12 @@ describe("GET /api/admin/config", () => {
   let env: Env;
   let app: Hono<{ Bindings: Env }>;
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    TEST_API_KEY_HASH = await computeHash(TEST_API_KEY);
     env = createMockEnv();
     const setup = createApp(env);
     app = setup.app;
+    mockD1ForApiKey(env);
   });
 
   it("returns 401 without Authorization header", async () => {
@@ -107,14 +156,14 @@ describe("GET /api/admin/config", () => {
     expect(body.config).toBeNull();
   });
 
-  it("reads from KV with the correct key", async () => {
+  it("reads from KV with the tenant-scoped key", async () => {
     vi.mocked(env.STATUS_KV.get).mockResolvedValueOnce(null);
 
     await app.request("/api/admin/config", {
       headers: AUTH_HEADER,
     }, env);
 
-    expect(env.STATUS_KV.get).toHaveBeenCalledWith(KV_KEYS.config);
+    expect(env.STATUS_KV.get).toHaveBeenCalledWith(KV_KEYS.tenantConfig(TEST_TENANT.id));
   });
 });
 
@@ -122,10 +171,12 @@ describe("PUT /api/admin/config", () => {
   let env: Env;
   let app: Hono<{ Bindings: Env }>;
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    TEST_API_KEY_HASH = await computeHash(TEST_API_KEY);
     env = createMockEnv();
     const setup = createApp(env);
     app = setup.app;
+    mockD1ForApiKey(env);
   });
 
   it("returns 401 without auth", async () => {
@@ -137,7 +188,7 @@ describe("PUT /api/admin/config", () => {
     expect(res.status).toBe(401);
   });
 
-  it("saves valid config to KV", async () => {
+  it("saves valid config to KV with tenant-scoped key", async () => {
     const config = validConfig();
 
     const res = await app.request("/api/admin/config", {
@@ -150,7 +201,7 @@ describe("PUT /api/admin/config", () => {
     const body = await res.json();
     expect(body.message).toBe("Configuration updated");
     expect(env.STATUS_KV.put).toHaveBeenCalledWith(
-      KV_KEYS.config,
+      KV_KEYS.tenantConfig(TEST_TENANT.id),
       expect.any(String),
     );
   });

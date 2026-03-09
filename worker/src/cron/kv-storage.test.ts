@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { storeResults } from "./kv-storage";
+import { storeResults, storeTenantHealthResult, storeTenantOverallStatus } from "./kv-storage";
+import type { TenantCheckResult } from "./service-checks";
+import type { TenantOverallStatus } from "./kv-storage";
 import { createMockEnv } from "../test-helpers";
 import type { Env, HealthCheckResult, LatestStatus, HistoryEntry, DailyUptime, OverallStatus } from "../types";
 import { KV_KEYS } from "../types";
@@ -320,6 +322,191 @@ describe("kv-storage", () => {
         (call) => call[0] === KV_KEYS.overall,
       );
       const overall: OverallStatus = JSON.parse(overallCalls[0][1] as string);
+      expect(overall.updatedAt).toBeDefined();
+      expect(new Date(overall.updatedAt).getTime()).not.toBeNaN();
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Tenant-scoped storage
+  // ---------------------------------------------------------------------------
+
+  describe("storeTenantHealthResult", () => {
+    const tenantId = "tenant-abc";
+
+    function makeTenantResult(
+      slug: string,
+      status: TenantCheckResult["status"] = "operational",
+      overrides?: Partial<TenantCheckResult>,
+    ): TenantCheckResult {
+      return {
+        slug,
+        status,
+        latencyMs: 42,
+        checkedAt: "2026-03-08T12:00:00.000Z",
+        ...overrides,
+      };
+    }
+
+    it("stores latest status in tenant-prefixed KV key", async () => {
+      const result = makeTenantResult("web-app");
+      await storeTenantHealthResult(env, tenantId, result, dateStr);
+
+      expect(env.STATUS_KV.put).toHaveBeenCalledWith(
+        KV_KEYS.tenantLatest(tenantId, "web-app"),
+        expect.any(String),
+      );
+    });
+
+    it("stores correct shape in latest KV entry", async () => {
+      const result = makeTenantResult("api", "degraded", { latencyMs: 150, error: "slow" });
+      await storeTenantHealthResult(env, tenantId, result, dateStr);
+
+      const latestCalls = vi.mocked(env.STATUS_KV.put).mock.calls.filter(
+        (call) => call[0] === KV_KEYS.tenantLatest(tenantId, "api"),
+      );
+      const stored = JSON.parse(latestCalls[0][1] as string);
+      expect(stored.slug).toBe("api");
+      expect(stored.status).toBe("degraded");
+      expect(stored.latencyMs).toBe(150);
+      expect(stored.error).toBe("slow");
+    });
+
+    it("appends to tenant history", async () => {
+      const result = makeTenantResult("web-app");
+      await storeTenantHealthResult(env, tenantId, result, dateStr);
+
+      const historyKey = KV_KEYS.tenantHistory(tenantId, "web-app", dateStr);
+      const historyCalls = vi.mocked(env.STATUS_KV.put).mock.calls.filter(
+        (call) => call[0] === historyKey,
+      );
+      expect(historyCalls.length).toBe(1);
+      const history: HistoryEntry[] = JSON.parse(historyCalls[0][1] as string);
+      expect(history).toHaveLength(1);
+      expect(history[0].status).toBe("operational");
+    });
+
+    it("appends to existing tenant history", async () => {
+      const historyKey = KV_KEYS.tenantHistory(tenantId, "web-app", dateStr);
+      const existing: HistoryEntry[] = [
+        { status: "operational", latencyMs: 30, checkedAt: "2026-03-08T11:55:00.000Z" },
+      ];
+      vi.mocked(env.STATUS_KV.get).mockImplementation(async (key: string) => {
+        if (key === historyKey) return JSON.stringify(existing);
+        return null;
+      });
+
+      const result = makeTenantResult("web-app");
+      await storeTenantHealthResult(env, tenantId, result, dateStr);
+
+      const historyCalls = vi.mocked(env.STATUS_KV.put).mock.calls.filter(
+        (call) => call[0] === historyKey,
+      );
+      const history: HistoryEntry[] = JSON.parse(historyCalls[0][1] as string);
+      expect(history).toHaveLength(2);
+    });
+
+    it("updates tenant daily uptime", async () => {
+      const result = makeTenantResult("web-app");
+      await storeTenantHealthResult(env, tenantId, result, dateStr);
+
+      const uptimeKey = KV_KEYS.tenantDailyUptime(tenantId, "web-app", dateStr);
+      const uptimeCalls = vi.mocked(env.STATUS_KV.put).mock.calls.filter(
+        (call) => call[0] === uptimeKey,
+      );
+      expect(uptimeCalls.length).toBe(1);
+      const uptime: DailyUptime = JSON.parse(uptimeCalls[0][1] as string);
+      expect(uptime.totalChecks).toBe(1);
+      expect(uptime.operationalChecks).toBe(1);
+      expect(uptime.uptimePercent).toBe(100);
+    });
+
+    it("increments down counter for down status", async () => {
+      const result = makeTenantResult("web-app", "down");
+      await storeTenantHealthResult(env, tenantId, result, dateStr);
+
+      const uptimeKey = KV_KEYS.tenantDailyUptime(tenantId, "web-app", dateStr);
+      const uptimeCalls = vi.mocked(env.STATUS_KV.put).mock.calls.filter(
+        (call) => call[0] === uptimeKey,
+      );
+      const uptime: DailyUptime = JSON.parse(uptimeCalls[0][1] as string);
+      expect(uptime.downChecks).toBe(1);
+      expect(uptime.uptimePercent).toBe(0);
+    });
+  });
+
+  describe("storeTenantOverallStatus", () => {
+    const tenantId = "tenant-abc";
+
+    it("stores overall status as operational when all services are operational", async () => {
+      const results: TenantCheckResult[] = [
+        { slug: "web", status: "operational", latencyMs: 30, checkedAt: "2026-03-08T12:00:00.000Z" },
+        { slug: "api", status: "operational", latencyMs: 40, checkedAt: "2026-03-08T12:00:00.000Z" },
+      ];
+      await storeTenantOverallStatus(env, tenantId, results);
+
+      const overallCalls = vi.mocked(env.STATUS_KV.put).mock.calls.filter(
+        (call) => call[0] === KV_KEYS.tenantOverall(tenantId),
+      );
+      expect(overallCalls.length).toBe(1);
+      const overall: TenantOverallStatus = JSON.parse(overallCalls[0][1] as string);
+      expect(overall.status).toBe("operational");
+      expect(overall.services["web"]).toBe("operational");
+      expect(overall.services["api"]).toBe("operational");
+    });
+
+    it("stores overall status as down when any service is down", async () => {
+      const results: TenantCheckResult[] = [
+        { slug: "web", status: "operational", latencyMs: 30, checkedAt: "2026-03-08T12:00:00.000Z" },
+        { slug: "api", status: "down", latencyMs: 40, checkedAt: "2026-03-08T12:00:00.000Z" },
+      ];
+      await storeTenantOverallStatus(env, tenantId, results);
+
+      const overallCalls = vi.mocked(env.STATUS_KV.put).mock.calls.filter(
+        (call) => call[0] === KV_KEYS.tenantOverall(tenantId),
+      );
+      const overall: TenantOverallStatus = JSON.parse(overallCalls[0][1] as string);
+      expect(overall.status).toBe("down");
+    });
+
+    it("stores overall status as degraded when any service is degraded (none down)", async () => {
+      const results: TenantCheckResult[] = [
+        { slug: "web", status: "operational", latencyMs: 30, checkedAt: "2026-03-08T12:00:00.000Z" },
+        { slug: "api", status: "degraded", latencyMs: 40, checkedAt: "2026-03-08T12:00:00.000Z" },
+      ];
+      await storeTenantOverallStatus(env, tenantId, results);
+
+      const overallCalls = vi.mocked(env.STATUS_KV.put).mock.calls.filter(
+        (call) => call[0] === KV_KEYS.tenantOverall(tenantId),
+      );
+      const overall: TenantOverallStatus = JSON.parse(overallCalls[0][1] as string);
+      expect(overall.status).toBe("degraded");
+    });
+
+    it("down takes priority over degraded", async () => {
+      const results: TenantCheckResult[] = [
+        { slug: "web", status: "degraded", latencyMs: 30, checkedAt: "2026-03-08T12:00:00.000Z" },
+        { slug: "api", status: "down", latencyMs: 40, checkedAt: "2026-03-08T12:00:00.000Z" },
+      ];
+      await storeTenantOverallStatus(env, tenantId, results);
+
+      const overallCalls = vi.mocked(env.STATUS_KV.put).mock.calls.filter(
+        (call) => call[0] === KV_KEYS.tenantOverall(tenantId),
+      );
+      const overall: TenantOverallStatus = JSON.parse(overallCalls[0][1] as string);
+      expect(overall.status).toBe("down");
+    });
+
+    it("includes updatedAt timestamp", async () => {
+      const results: TenantCheckResult[] = [
+        { slug: "web", status: "operational", latencyMs: 30, checkedAt: "2026-03-08T12:00:00.000Z" },
+      ];
+      await storeTenantOverallStatus(env, tenantId, results);
+
+      const overallCalls = vi.mocked(env.STATUS_KV.put).mock.calls.filter(
+        (call) => call[0] === KV_KEYS.tenantOverall(tenantId),
+      );
+      const overall: TenantOverallStatus = JSON.parse(overallCalls[0][1] as string);
       expect(overall.updatedAt).toBeDefined();
       expect(new Date(overall.updatedAt).getTime()).not.toBeNaN();
     });

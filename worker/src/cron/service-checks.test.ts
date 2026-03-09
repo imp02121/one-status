@@ -1,12 +1,13 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { runAllChecks } from "./service-checks";
+import { runAllChecks, runTenantServiceChecks } from "./service-checks";
 import {
   createFetchResponse,
   createHeadResponse,
   mockApiHealthResponse,
+  mockTenantService,
 } from "../test-helpers";
 import { TimeoutError } from "../lib/fetch-timeout";
-import type { HealthCheckResult, ServiceName } from "../types";
+import type { HealthCheckResult, ServiceName, TenantService } from "../types";
 
 describe("service-checks", () => {
   const now = new Date("2026-03-08T12:00:00.000Z");
@@ -256,6 +257,137 @@ describe("service-checks", () => {
         const result = results.find((r) => r.service === service);
         expect(result!.latencyMs).toBe(api!.latencyMs);
       }
+    });
+  });
+
+  describe("runTenantServiceChecks", () => {
+    it("returns results for all tenant services", async () => {
+      vi.mocked(fetch).mockResolvedValue(createHeadResponse(200));
+
+      const services: TenantService[] = [
+        mockTenantService({ slug: "web-app", url: "https://app.example.com" }),
+        mockTenantService({ slug: "api", url: "https://api.example.com" }),
+      ];
+
+      const results = await runTenantServiceChecks(services, now);
+
+      expect(results).toHaveLength(2);
+      expect(results[0].slug).toBe("web-app");
+      expect(results[1].slug).toBe("api");
+    });
+
+    it("sets status to operational on HEAD 200", async () => {
+      vi.mocked(fetch).mockResolvedValue(createHeadResponse(200));
+
+      const services = [
+        mockTenantService({ slug: "site", url: "https://example.com", checkType: "head" }),
+      ];
+
+      const results = await runTenantServiceChecks(services, now);
+
+      expect(results[0].status).toBe("operational");
+      expect(results[0].error).toBeUndefined();
+    });
+
+    it("sets status to down on HEAD non-200", async () => {
+      vi.mocked(fetch).mockResolvedValue(createHeadResponse(503));
+
+      const services = [
+        mockTenantService({ slug: "site", url: "https://example.com", checkType: "head" }),
+      ];
+
+      const results = await runTenantServiceChecks(services, now);
+
+      expect(results[0].status).toBe("down");
+      expect(results[0].error).toBe("HTTP 503");
+    });
+
+    it("sets status to operational on deep-health with healthy response", async () => {
+      vi.mocked(fetch).mockResolvedValue(
+        createFetchResponse(mockApiHealthResponse({ status: "healthy" })),
+      );
+
+      const services = [
+        mockTenantService({ slug: "backend", url: "https://api.example.com/health", checkType: "deep-health" }),
+      ];
+
+      const results = await runTenantServiceChecks(services, now);
+
+      expect(results[0].status).toBe("operational");
+    });
+
+    it("sets status to degraded on deep-health with degraded response", async () => {
+      vi.mocked(fetch).mockResolvedValue(
+        createFetchResponse(mockApiHealthResponse({ status: "degraded" })),
+      );
+
+      const services = [
+        mockTenantService({ slug: "backend", url: "https://api.example.com/health", checkType: "deep-health" }),
+      ];
+
+      const results = await runTenantServiceChecks(services, now);
+
+      expect(results[0].status).toBe("degraded");
+    });
+
+    it("sets status to down on network error", async () => {
+      vi.mocked(fetch).mockRejectedValue(new TypeError("Failed to fetch"));
+
+      const services = [
+        mockTenantService({ slug: "site", url: "https://example.com", checkType: "head" }),
+      ];
+
+      const results = await runTenantServiceChecks(services, now);
+
+      expect(results[0].status).toBe("down");
+      expect(results[0].error).toContain("Failed to fetch");
+    });
+
+    it("sets status to down with timeout error", async () => {
+      vi.mocked(fetch).mockRejectedValue(
+        new TimeoutError("https://example.com", 5000),
+      );
+
+      const services = [
+        mockTenantService({ slug: "site", url: "https://example.com", checkType: "head" }),
+      ];
+
+      const results = await runTenantServiceChecks(services, now);
+
+      expect(results[0].status).toBe("down");
+      expect(results[0].error).toBe("timeout");
+    });
+
+    it("includes checkedAt on all results", async () => {
+      vi.mocked(fetch).mockResolvedValue(createHeadResponse(200));
+
+      const services = [
+        mockTenantService({ slug: "a", url: "https://a.example.com" }),
+        mockTenantService({ slug: "b", url: "https://b.example.com" }),
+      ];
+
+      const results = await runTenantServiceChecks(services, now);
+
+      for (const result of results) {
+        expect(result.checkedAt).toBe(checkedAt);
+      }
+    });
+
+    it("includes latencyMs on all results", async () => {
+      vi.mocked(fetch).mockResolvedValue(createHeadResponse(200));
+
+      const services = [
+        mockTenantService({ slug: "a", url: "https://a.example.com" }),
+      ];
+
+      const results = await runTenantServiceChecks(services, now);
+
+      expect(results[0].latencyMs).toBeGreaterThanOrEqual(0);
+    });
+
+    it("handles empty services array", async () => {
+      const results = await runTenantServiceChecks([], now);
+      expect(results).toHaveLength(0);
     });
   });
 });

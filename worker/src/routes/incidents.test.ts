@@ -1,11 +1,18 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Hono } from "hono";
-import type { Env, Incident } from "../types";
+import type { Env, Incident, Tenant } from "../types";
 import { incidentRoutes } from "./incidents";
-import { createMockEnv, createMockD1 } from "../test-helpers";
+import { createMockEnv, createMockD1, mockTenant } from "../test-helpers";
+
+const TEST_TENANT = mockTenant();
 
 function createApp(env: Env) {
-  const app = new Hono<{ Bindings: Env }>();
+  const app = new Hono<{ Bindings: Env; Variables: { tenant: Tenant } }>();
+  // Inject tenant context for tests
+  app.use("/api/*", async (c, next) => {
+    c.set("tenant", TEST_TENANT);
+    return next();
+  });
   app.route("/api", incidentRoutes);
   return app;
 }
@@ -18,6 +25,7 @@ function mockIncident(overrides?: Partial<Incident>): Incident {
     status: "investigating",
     severity: "major",
     affectedServices: '["api"]',
+    tenantId: TEST_TENANT.id,
     createdAt: "2026-03-08T10:00:00.000Z",
     updatedAt: "2026-03-08T10:05:00.000Z",
     resolvedAt: null,
@@ -27,7 +35,7 @@ function mockIncident(overrides?: Partial<Incident>): Incident {
 
 describe("GET /api/incidents", () => {
   let env: Env;
-  let app: Hono<{ Bindings: Env }>;
+  let app: Hono<{ Bindings: Env; Variables: { tenant: Tenant } }>;
 
   beforeEach(() => {
     const incidents = [
@@ -38,11 +46,14 @@ describe("GET /api/incidents", () => {
     env = createMockEnv({
       STATUS_DB: createMockD1({
         firstResults: new Map([
-          ["SELECT COUNT(*) as total FROM status_incidents", { total: 2 }],
+          [
+            "SELECT COUNT(*) as total FROM status_incidents WHERE tenant_id = ?",
+            { total: 2 },
+          ],
         ]),
         queryResults: new Map([
           [
-            "SELECT * FROM status_incidents ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            "SELECT * FROM status_incidents WHERE tenant_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
             incidents,
           ],
         ]),
@@ -148,11 +159,14 @@ describe("GET /api/incidents", () => {
     env = createMockEnv({
       STATUS_DB: createMockD1({
         firstResults: new Map([
-          ["SELECT COUNT(*) as total FROM status_incidents", { total: 0 }],
+          [
+            "SELECT COUNT(*) as total FROM status_incidents WHERE tenant_id = ?",
+            { total: 0 },
+          ],
         ]),
         queryResults: new Map([
           [
-            "SELECT * FROM status_incidents ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            "SELECT * FROM status_incidents WHERE tenant_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
             [],
           ],
         ]),
@@ -181,11 +195,14 @@ describe("GET /api/incidents", () => {
     env = createMockEnv({
       STATUS_DB: createMockD1({
         firstResults: new Map([
-          ["SELECT COUNT(*) as total FROM status_incidents", { total: 45 }],
+          [
+            "SELECT COUNT(*) as total FROM status_incidents WHERE tenant_id = ?",
+            { total: 45 },
+          ],
         ]),
         queryResults: new Map([
           [
-            "SELECT * FROM status_incidents ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            "SELECT * FROM status_incidents WHERE tenant_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
             [],
           ],
         ]),

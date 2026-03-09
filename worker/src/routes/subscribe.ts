@@ -1,9 +1,9 @@
 /**
- * POST /api/subscribe — subscribe to status notifications
+ * POST /api/subscribe — subscribe to status notifications (tenant-scoped)
  */
 import { Hono } from "hono";
 import { z } from "zod";
-import type { Env } from "../types";
+import type { Env, Tenant } from "../types";
 import { fetchWithTimeout } from "../lib/fetch-timeout";
 import { escapeHtml } from "../lib/html";
 import { rateLimit } from "../middleware/rate-limit";
@@ -12,12 +12,16 @@ const subscribeSchema = z.object({
   email: z.string().email().max(320),
 });
 
-export const subscribeRoutes = new Hono<{ Bindings: Env }>();
+export const subscribeRoutes = new Hono<{
+  Bindings: Env;
+  Variables: { tenant: Tenant };
+}>();
 
 subscribeRoutes.post(
   "/subscribe",
   rateLimit({ maxRequests: 3, windowSeconds: 3600 }),
   async (c) => {
+    const tenant = c.get("tenant");
     const body = await c.req.json().catch(() => null);
     if (!body) {
       return c.json({ error: "Invalid JSON body" }, 400);
@@ -30,11 +34,11 @@ subscribeRoutes.post(
 
     const { email } = parsed.data;
 
-    // Check if already subscribed
+    // Check if already subscribed (scoped by tenant)
     const existing = await c.env.STATUS_DB.prepare(
-      "SELECT id, verified FROM status_subscribers WHERE email = ?",
+      "SELECT id, verified FROM status_subscribers WHERE email = ? AND tenant_id = ?",
     )
-      .bind(email)
+      .bind(email, tenant.id)
       .first<{ id: number; verified: number }>();
 
     if (existing?.verified) {
@@ -47,15 +51,15 @@ subscribeRoutes.post(
     if (existing) {
       // Re-send verification for unverified
       await c.env.STATUS_DB.prepare(
-        "UPDATE status_subscribers SET verify_token = ?, unsubscribe_token = ? WHERE id = ?",
+        "UPDATE status_subscribers SET verify_token = ?, unsubscribe_token = ? WHERE id = ? AND tenant_id = ?",
       )
-        .bind(verifyToken, unsubscribeToken, existing.id)
+        .bind(verifyToken, unsubscribeToken, existing.id, tenant.id)
         .run();
     } else {
       await c.env.STATUS_DB.prepare(
-        "INSERT INTO status_subscribers (email, verify_token, unsubscribe_token) VALUES (?, ?, ?)",
+        "INSERT INTO status_subscribers (email, verify_token, unsubscribe_token, tenant_id) VALUES (?, ?, ?, ?)",
       )
-        .bind(email, verifyToken, unsubscribeToken)
+        .bind(email, verifyToken, unsubscribeToken, tenant.id)
         .run();
     }
 
@@ -66,20 +70,21 @@ subscribeRoutes.post(
   },
 );
 
-/** GET /api/verify — verify email subscription */
+/** GET /api/verify — verify email subscription (scoped by token lookup) */
 subscribeRoutes.get(
   "/verify",
   rateLimit({ maxRequests: 10, windowSeconds: 3600 }),
   async (c) => {
+    const tenant = c.get("tenant");
     const token = c.req.query("token");
     if (!token) {
       return c.json({ error: "Missing verification token" }, 400);
     }
 
     const subscriber = await c.env.STATUS_DB.prepare(
-      "SELECT id FROM status_subscribers WHERE verify_token = ?",
+      "SELECT id FROM status_subscribers WHERE verify_token = ? AND tenant_id = ?",
     )
-      .bind(token)
+      .bind(token, tenant.id)
       .first<{ id: number }>();
 
     if (!subscriber) {
@@ -87,9 +92,9 @@ subscribeRoutes.get(
     }
 
     await c.env.STATUS_DB.prepare(
-      "UPDATE status_subscribers SET verified = 1 WHERE id = ?",
+      "UPDATE status_subscribers SET verified = 1 WHERE id = ? AND tenant_id = ?",
     )
-      .bind(subscriber.id)
+      .bind(subscriber.id, tenant.id)
       .run();
 
     return c.html(verifiedHtml());

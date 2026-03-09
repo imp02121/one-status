@@ -1,34 +1,40 @@
 /**
- * GET /api/unsubscribe — unsubscribe from status notifications
+ * GET /api/unsubscribe — unsubscribe from status notifications (tenant-scoped)
  */
 import { Hono } from "hono";
-import type { Env } from "../types";
+import type { Env, Tenant } from "../types";
 import { escapeHtml } from "../lib/html";
 import { rateLimit } from "../middleware/rate-limit";
 
-export const unsubscribeRoutes = new Hono<{ Bindings: Env }>();
+export const unsubscribeRoutes = new Hono<{
+  Bindings: Env;
+  Variables: { tenant: Tenant };
+}>();
 
 unsubscribeRoutes.get(
   "/unsubscribe",
   rateLimit({ maxRequests: 10, windowSeconds: 3600 }),
   async (c) => {
+    const tenant = c.get("tenant");
     const token = c.req.query("token");
     if (!token) {
       return c.html(unsubscribeHtml("Missing unsubscribe token.", false), 400);
     }
 
     const subscriber = await c.env.STATUS_DB.prepare(
-      "SELECT id, email FROM status_subscribers WHERE unsubscribe_token = ?",
+      "SELECT id, email FROM status_subscribers WHERE unsubscribe_token = ? AND tenant_id = ?",
     )
-      .bind(token)
+      .bind(token, tenant.id)
       .first<{ id: number; email: string }>();
 
     if (!subscriber) {
       return c.html(unsubscribeHtml("Invalid or expired unsubscribe link.", false), 404);
     }
 
-    await c.env.STATUS_DB.prepare("DELETE FROM status_subscribers WHERE id = ?")
-      .bind(subscriber.id)
+    await c.env.STATUS_DB.prepare(
+      "DELETE FROM status_subscribers WHERE id = ? AND tenant_id = ?",
+    )
+      .bind(subscriber.id, tenant.id)
       .run();
 
     return c.html(unsubscribeHtml("You have been unsubscribed from BundleNudge status notifications.", true));

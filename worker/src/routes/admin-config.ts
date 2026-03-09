@@ -1,14 +1,14 @@
 /**
- * Admin config endpoints (KV-backed)
+ * Admin config endpoints (KV-backed, tenant-scoped, API key auth)
  *
  *   GET /admin/config — get current config
  *   PUT /admin/config — update config
  */
 import { Hono } from "hono";
 import { z } from "zod";
-import type { Env } from "../types";
+import type { Env, Tenant } from "../types";
 import { KV_KEYS } from "../types";
-import { requireAdmin } from "../middleware/admin-auth";
+import { requireApiKey } from "../middleware/api-key-auth";
 
 const SEVERITY_VALUES = ["critical", "major", "minor", "maintenance"] as const;
 
@@ -47,11 +47,15 @@ const configSchema = z.object({
   }),
 });
 
-export const adminConfigRoutes = new Hono<{ Bindings: Env }>();
+export const adminConfigRoutes = new Hono<{
+  Bindings: Env;
+  Variables: { tenant: Tenant };
+}>();
 
-/** GET /admin/config — get current config */
-adminConfigRoutes.get("/admin/config", requireAdmin, async (c) => {
-  const raw = await c.env.STATUS_KV.get(KV_KEYS.config);
+/** GET /admin/config — get current config (tenant-scoped) */
+adminConfigRoutes.get("/admin/config", requireApiKey, async (c) => {
+  const tenant = c.get("tenant");
+  const raw = await c.env.STATUS_KV.get(KV_KEYS.tenantConfig(tenant.id));
   if (!raw) {
     return c.json({ config: null });
   }
@@ -64,8 +68,9 @@ adminConfigRoutes.get("/admin/config", requireAdmin, async (c) => {
   }
 });
 
-/** PUT /admin/config — update config */
-adminConfigRoutes.put("/admin/config", requireAdmin, async (c) => {
+/** PUT /admin/config — update config (tenant-scoped) */
+adminConfigRoutes.put("/admin/config", requireApiKey, async (c) => {
+  const tenant = c.get("tenant");
   let body: unknown;
   try {
     body = await c.req.json();
@@ -78,7 +83,7 @@ adminConfigRoutes.put("/admin/config", requireAdmin, async (c) => {
     return c.json({ error: "Invalid configuration", details: parsed.error.flatten().fieldErrors }, 400);
   }
 
-  await c.env.STATUS_KV.put(KV_KEYS.config, JSON.stringify(parsed.data));
+  await c.env.STATUS_KV.put(KV_KEYS.tenantConfig(tenant.id), JSON.stringify(parsed.data));
 
   return c.json({ message: "Configuration updated" });
 });

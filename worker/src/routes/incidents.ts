@@ -13,8 +13,8 @@
  */
 import { Hono } from "hono";
 import { z } from "zod";
-import type { Env, Incident, IncidentUpdate, ServiceName } from "../types";
-import { requireAdmin } from "../middleware/admin-auth";
+import type { Env, Incident, IncidentUpdate, ServiceName, Tenant } from "../types";
+import { requireApiKey } from "../middleware/api-key-auth";
 import { sendSlackIncidentNotification } from "../lib/slack";
 import { notifyIncidentViaConfig } from "../lib/notifications";
 
@@ -47,10 +47,14 @@ const incidentUpdateSchema = z.object({
   status: z.enum(STATUS_VALUES),
 });
 
-export const incidentRoutes = new Hono<{ Bindings: Env }>();
+export const incidentRoutes = new Hono<{
+  Bindings: Env;
+  Variables: { tenant: Tenant };
+}>();
 
-/** GET /incidents — paginated incident list */
+/** GET /incidents — paginated incident list (scoped by tenant) */
 incidentRoutes.get("/incidents", async (c) => {
+  const tenant = c.get("tenant");
   const parsed = listQuerySchema.safeParse({
     page: c.req.query("page"),
     limit: c.req.query("limit"),
@@ -64,11 +68,15 @@ incidentRoutes.get("/incidents", async (c) => {
   const offset = (page - 1) * limit;
 
   const [countResult, rows] = await Promise.all([
-    c.env.STATUS_DB.prepare("SELECT COUNT(*) as total FROM status_incidents").first<{ total: number }>(),
     c.env.STATUS_DB.prepare(
-      "SELECT * FROM status_incidents ORDER BY created_at DESC LIMIT ? OFFSET ?",
+      "SELECT COUNT(*) as total FROM status_incidents WHERE tenant_id = ?",
     )
-      .bind(limit, offset)
+      .bind(tenant.id)
+      .first<{ total: number }>(),
+    c.env.STATUS_DB.prepare(
+      "SELECT * FROM status_incidents WHERE tenant_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+    )
+      .bind(tenant.id, limit, offset)
       .all<Incident>(),
   ]);
 
@@ -85,21 +93,24 @@ incidentRoutes.get("/incidents", async (c) => {
   });
 });
 
-/** GET /incidents/:id — single incident with updates */
+/** GET /incidents/:id — single incident with updates (scoped by tenant) */
 incidentRoutes.get("/incidents/:id", async (c) => {
+  const tenant = c.get("tenant");
   const id = parseInt(c.req.param("id"), 10);
   if (isNaN(id)) {
     return c.json({ error: "Invalid incident ID" }, 400);
   }
 
   const [incident, updates] = await Promise.all([
-    c.env.STATUS_DB.prepare("SELECT * FROM status_incidents WHERE id = ?")
-      .bind(id)
+    c.env.STATUS_DB.prepare(
+      "SELECT * FROM status_incidents WHERE id = ? AND tenant_id = ?",
+    )
+      .bind(id, tenant.id)
       .first<Incident>(),
     c.env.STATUS_DB.prepare(
-      "SELECT * FROM status_incident_updates WHERE incident_id = ? ORDER BY created_at ASC",
+      "SELECT * FROM status_incident_updates WHERE incident_id = ? AND tenant_id = ? ORDER BY created_at ASC",
     )
-      .bind(id)
+      .bind(id, tenant.id)
       .all<IncidentUpdate>(),
   ]);
 
@@ -110,8 +121,9 @@ incidentRoutes.get("/incidents/:id", async (c) => {
   return c.json({ incident, updates: updates.results });
 });
 
-/** POST /incidents — create incident (admin) */
-incidentRoutes.post("/incidents", requireAdmin, async (c) => {
+/** POST /incidents — create incident (API key auth) */
+incidentRoutes.post("/incidents", requireApiKey, async (c) => {
+  const tenant = c.get("tenant");
   let body: unknown;
   try {
     body = await c.req.json();
@@ -129,10 +141,10 @@ incidentRoutes.post("/incidents", requireAdmin, async (c) => {
   const resolvedAt = status === "resolved" ? now : null;
 
   const result = await c.env.STATUS_DB.prepare(
-    `INSERT INTO status_incidents (title, description, severity, status, affected_services, created_at, updated_at, resolved_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO status_incidents (title, description, severity, status, affected_services, tenant_id, created_at, updated_at, resolved_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
-    .bind(title, description, severity, status, JSON.stringify(affectedServices), now, now, resolvedAt)
+    .bind(title, description, severity, status, JSON.stringify(affectedServices), tenant.id, now, now, resolvedAt)
     .run();
 
   const incidentId = result.meta.last_row_id;
@@ -170,8 +182,9 @@ incidentRoutes.post("/incidents", requireAdmin, async (c) => {
   return c.json({ id: incidentId, message: "Incident created" }, 201);
 });
 
-/** PUT|PATCH /incidents/:id — update incident (admin) */
-incidentRoutes.on(["PUT", "PATCH"], "/incidents/:id", requireAdmin, async (c) => {
+/** PUT|PATCH /incidents/:id — update incident (API key auth, scoped by tenant) */
+incidentRoutes.on(["PUT", "PATCH"], "/incidents/:id", requireApiKey, async (c) => {
+  const tenant = c.get("tenant");
   const id = parseInt(c.req.param("id"), 10);
   if (isNaN(id)) {
     return c.json({ error: "Invalid incident ID" }, 400);
@@ -189,8 +202,10 @@ incidentRoutes.on(["PUT", "PATCH"], "/incidents/:id", requireAdmin, async (c) =>
     return c.json({ error: "Invalid parameters", details: parsed.error.flatten().fieldErrors }, 400);
   }
 
-  const existing = await c.env.STATUS_DB.prepare("SELECT * FROM status_incidents WHERE id = ?")
-    .bind(id)
+  const existing = await c.env.STATUS_DB.prepare(
+    "SELECT * FROM status_incidents WHERE id = ? AND tenant_id = ?",
+  )
+    .bind(id, tenant.id)
     .first<Incident>();
 
   if (!existing) {
@@ -206,7 +221,7 @@ incidentRoutes.on(["PUT", "PATCH"], "/incidents/:id", requireAdmin, async (c) =>
     `UPDATE status_incidents
      SET title = ?, description = ?, severity = ?, status = ?,
          affected_services = ?, updated_at = ?, resolved_at = ?
-     WHERE id = ?`,
+     WHERE id = ? AND tenant_id = ?`,
   )
     .bind(
       data.title ?? existing.title,
@@ -217,21 +232,25 @@ incidentRoutes.on(["PUT", "PATCH"], "/incidents/:id", requireAdmin, async (c) =>
       now,
       resolvedAt,
       id,
+      tenant.id,
     )
     .run();
 
   return c.json({ message: "Incident updated" });
 });
 
-/** DELETE /incidents/:id — delete incident (admin) */
-incidentRoutes.delete("/incidents/:id", requireAdmin, async (c) => {
+/** DELETE /incidents/:id — delete incident (API key auth, scoped by tenant) */
+incidentRoutes.delete("/incidents/:id", requireApiKey, async (c) => {
+  const tenant = c.get("tenant");
   const id = parseInt(c.req.param("id"), 10);
   if (isNaN(id)) {
     return c.json({ error: "Invalid incident ID" }, 400);
   }
 
-  const existing = await c.env.STATUS_DB.prepare("SELECT id FROM status_incidents WHERE id = ?")
-    .bind(id)
+  const existing = await c.env.STATUS_DB.prepare(
+    "SELECT id FROM status_incidents WHERE id = ? AND tenant_id = ?",
+  )
+    .bind(id, tenant.id)
     .first<{ id: number }>();
 
   if (!existing) {
@@ -239,18 +258,23 @@ incidentRoutes.delete("/incidents/:id", requireAdmin, async (c) => {
   }
 
   // Delete updates first, then incident
-  await c.env.STATUS_DB.prepare("DELETE FROM status_incident_updates WHERE incident_id = ?")
-    .bind(id)
+  await c.env.STATUS_DB.prepare(
+    "DELETE FROM status_incident_updates WHERE incident_id = ? AND tenant_id = ?",
+  )
+    .bind(id, tenant.id)
     .run();
-  await c.env.STATUS_DB.prepare("DELETE FROM status_incidents WHERE id = ?")
-    .bind(id)
+  await c.env.STATUS_DB.prepare(
+    "DELETE FROM status_incidents WHERE id = ? AND tenant_id = ?",
+  )
+    .bind(id, tenant.id)
     .run();
 
   return c.json({ message: "Incident deleted" });
 });
 
-/** POST /incidents/:id/updates — add incident update (admin) */
-incidentRoutes.post("/incidents/:id/updates", requireAdmin, async (c) => {
+/** POST /incidents/:id/updates — add incident update (API key auth, scoped by tenant) */
+incidentRoutes.post("/incidents/:id/updates", requireApiKey, async (c) => {
+  const tenant = c.get("tenant");
   const id = parseInt(c.req.param("id"), 10);
   if (isNaN(id)) {
     return c.json({ error: "Invalid incident ID" }, 400);
@@ -268,8 +292,10 @@ incidentRoutes.post("/incidents/:id/updates", requireAdmin, async (c) => {
     return c.json({ error: "Invalid parameters", details: parsed.error.flatten().fieldErrors }, 400);
   }
 
-  const existing = await c.env.STATUS_DB.prepare("SELECT id, status FROM status_incidents WHERE id = ?")
-    .bind(id)
+  const existing = await c.env.STATUS_DB.prepare(
+    "SELECT id, status FROM status_incidents WHERE id = ? AND tenant_id = ?",
+  )
+    .bind(id, tenant.id)
     .first<{ id: number; status: string }>();
 
   if (!existing) {
@@ -281,24 +307,24 @@ incidentRoutes.post("/incidents/:id/updates", requireAdmin, async (c) => {
 
   // Insert the update
   const result = await c.env.STATUS_DB.prepare(
-    "INSERT INTO status_incident_updates (incident_id, message, status, created_at) VALUES (?, ?, ?, ?)",
+    "INSERT INTO status_incident_updates (incident_id, message, status, tenant_id, created_at) VALUES (?, ?, ?, ?, ?)",
   )
-    .bind(id, message, status, now)
+    .bind(id, message, status, tenant.id, now)
     .run();
 
   // Update the incident status and resolved_at if status changed
   const resolvedAt = status === "resolved" && existing.status !== "resolved" ? now : null;
   if (resolvedAt) {
     await c.env.STATUS_DB.prepare(
-      "UPDATE status_incidents SET status = ?, updated_at = ?, resolved_at = ? WHERE id = ?",
+      "UPDATE status_incidents SET status = ?, updated_at = ?, resolved_at = ? WHERE id = ? AND tenant_id = ?",
     )
-      .bind(status, now, resolvedAt, id)
+      .bind(status, now, resolvedAt, id, tenant.id)
       .run();
   } else {
     await c.env.STATUS_DB.prepare(
-      "UPDATE status_incidents SET status = ?, updated_at = ? WHERE id = ?",
+      "UPDATE status_incidents SET status = ?, updated_at = ? WHERE id = ? AND tenant_id = ?",
     )
-      .bind(status, now, id)
+      .bind(status, now, id, tenant.id)
       .run();
   }
 

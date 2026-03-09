@@ -8,7 +8,7 @@ const SERVICE_DISPLAY_NAMES: Record<string, string> = {
   documentation: 'Documentation',
 };
 
-const API_BASE = import.meta.env.VITE_API_URL || 'https://status.bundlenudge.com';
+const API_BASE = import.meta.env.VITE_API_URL || 'https://status-api.bundlenudge.com';
 
 interface UptimeDay {
   date: string;

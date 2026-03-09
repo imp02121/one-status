@@ -1,14 +1,36 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { Hono } from "hono";
-import type { Env } from "../types";
+import type { Env, Tenant } from "../types";
 import { incidentRoutes } from "./incidents";
-import { createMockEnv } from "../test-helpers";
+import { createMockEnv, mockTenant } from "../test-helpers";
 
 // Mock fetch for Slack/email notifications
 vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response("ok", { status: 200 }))));
 
+const TEST_TENANT = mockTenant();
+
+// SHA-256 hash of "test-api-key" — pre-computed for test mocking
+const TEST_API_KEY = "test-api-key";
+let TEST_API_KEY_HASH: string;
+
+// Compute hash at module level
+async function computeHash(token: string): Promise<string> {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(token);
+  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+  const hashArray = new Uint8Array(hashBuffer);
+  return Array.from(hashArray)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 function createApp(env: Env) {
-  const app = new Hono<{ Bindings: Env }>();
+  const app = new Hono<{ Bindings: Env; Variables: { tenant: Tenant } }>();
+  // Inject tenant context for tests
+  app.use("/api/*", async (c, next) => {
+    c.set("tenant", TEST_TENANT);
+    return next();
+  });
   // Match production content-type middleware
   app.use("/api/*", async (c, next) => {
     const method = c.req.method;
@@ -24,17 +46,36 @@ function createApp(env: Env) {
   return { app, env };
 }
 
-const AUTH_HEADER = { Authorization: "Bearer test-admin-key-secret" };
+const AUTH_HEADER = { Authorization: `Bearer ${TEST_API_KEY}` };
 
+/**
+ * Mock D1 that handles both api_keys lookups (for requireApiKey middleware)
+ * and incident queries.
+ */
 function mockD1ForIncidents(env: Env, overrides?: {
   firstResult?: Record<string, unknown> | null;
   allResults?: Record<string, unknown>[];
   lastRowId?: number;
 }) {
-  vi.mocked(env.STATUS_DB.prepare).mockImplementation(() => {
+  vi.mocked(env.STATUS_DB.prepare).mockImplementation((query: string) => {
     const stmt = {
       bind: vi.fn().mockReturnThis(),
-      first: vi.fn().mockResolvedValue(overrides?.firstResult ?? null),
+      first: vi.fn().mockImplementation(async () => {
+        if (query.includes("api_keys")) {
+          return {
+            id: "key-1",
+            tenant_id: TEST_TENANT.id,
+            name: "Test Key",
+            key_hash: TEST_API_KEY_HASH,
+            key_prefix: "test",
+            scopes: '["incidents:write"]',
+            last_used_at: null,
+            expires_at: null,
+            created_at: "2026-01-01T00:00:00Z",
+          };
+        }
+        return overrides?.firstResult ?? null;
+      }),
       all: vi.fn().mockResolvedValue({
         results: overrides?.allResults ?? [],
       }),
@@ -52,7 +93,8 @@ describe("GET /api/incidents (public)", () => {
   let env: Env;
   let app: Hono<{ Bindings: Env }>;
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    TEST_API_KEY_HASH = await computeHash(TEST_API_KEY);
     env = createMockEnv();
     const setup = createApp(env);
     app = setup.app;
@@ -119,7 +161,8 @@ describe("GET /api/incidents/:id (public)", () => {
   let env: Env;
   let app: Hono<{ Bindings: Env }>;
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    TEST_API_KEY_HASH = await computeHash(TEST_API_KEY);
     env = createMockEnv();
     const setup = createApp(env);
     app = setup.app;
@@ -134,12 +177,12 @@ describe("GET /api/incidents/:id (public)", () => {
         bind: vi.fn().mockReturnThis(),
         first: vi.fn().mockResolvedValue(
           isFirst
-            ? { id: 1, title: "Outage", severity: "critical", status: "investigating", description: "", createdAt: "2026-03-01", updatedAt: "2026-03-01", resolvedAt: null, affectedServices: "[]" }
+            ? { id: 1, title: "Outage", severity: "critical", status: "investigating", description: "", createdAt: "2026-03-01", updatedAt: "2026-03-01", resolvedAt: null, affectedServices: "[]", tenantId: TEST_TENANT.id }
             : null,
         ),
         all: vi.fn().mockResolvedValue({
           results: isFirst ? [] : [
-            { id: 1, incidentId: 1, message: "Looking into it", status: "investigating", createdAt: "2026-03-01" },
+            { id: 1, incidentId: 1, message: "Looking into it", status: "investigating", createdAt: "2026-03-01", tenantId: TEST_TENANT.id },
           ],
         }),
         run: vi.fn().mockResolvedValue({ success: true, meta: {} }),
@@ -180,7 +223,8 @@ describe("POST /api/incidents (admin)", () => {
   let env: Env;
   let app: Hono<{ Bindings: Env }>;
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    TEST_API_KEY_HASH = await computeHash(TEST_API_KEY);
     env = createMockEnv();
     const setup = createApp(env);
     app = setup.app;
@@ -238,6 +282,8 @@ describe("POST /api/incidents (admin)", () => {
   });
 
   it("returns 400 for missing title", async () => {
+    mockD1ForIncidents(env);
+
     const res = await app.request("/api/incidents", {
       method: "POST",
       headers: { ...AUTH_HEADER, "Content-Type": "application/json" },
@@ -250,6 +296,8 @@ describe("POST /api/incidents (admin)", () => {
   });
 
   it("returns 400 for missing severity", async () => {
+    mockD1ForIncidents(env);
+
     const res = await app.request("/api/incidents", {
       method: "POST",
       headers: { ...AUTH_HEADER, "Content-Type": "application/json" },
@@ -260,6 +308,8 @@ describe("POST /api/incidents (admin)", () => {
   });
 
   it("returns 400 for invalid severity value", async () => {
+    mockD1ForIncidents(env);
+
     const res = await app.request("/api/incidents", {
       method: "POST",
       headers: { ...AUTH_HEADER, "Content-Type": "application/json" },
@@ -270,6 +320,8 @@ describe("POST /api/incidents (admin)", () => {
   });
 
   it("returns 400 for invalid status value", async () => {
+    mockD1ForIncidents(env);
+
     const res = await app.request("/api/incidents", {
       method: "POST",
       headers: { ...AUTH_HEADER, "Content-Type": "application/json" },
@@ -280,6 +332,8 @@ describe("POST /api/incidents (admin)", () => {
   });
 
   it("returns 400 for invalid JSON body", async () => {
+    mockD1ForIncidents(env);
+
     const res = await app.request("/api/incidents", {
       method: "POST",
       headers: { ...AUTH_HEADER, "Content-Type": "application/json" },
@@ -324,7 +378,8 @@ describe("PUT /api/incidents/:id (admin)", () => {
   let env: Env;
   let app: Hono<{ Bindings: Env }>;
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    TEST_API_KEY_HASH = await computeHash(TEST_API_KEY);
     env = createMockEnv();
     const setup = createApp(env);
     app = setup.app;
@@ -345,6 +400,7 @@ describe("PUT /api/incidents/:id (admin)", () => {
         id: 1, title: "Original", description: "desc", severity: "minor",
         status: "investigating", affectedServices: "[]",
         createdAt: "2026-03-01", updatedAt: "2026-03-01", resolvedAt: null,
+        tenantId: TEST_TENANT.id,
       },
     });
 
@@ -360,20 +416,13 @@ describe("PUT /api/incidents/:id (admin)", () => {
   });
 
   it("auto-sets resolvedAt when status changes to resolved", async () => {
-    const runMock = vi.fn().mockResolvedValue({ success: true, meta: { changes: 1 } });
-    vi.mocked(env.STATUS_DB.prepare).mockImplementation(() => {
-      const stmt = {
-        bind: vi.fn().mockReturnThis(),
-        first: vi.fn().mockResolvedValue({
-          id: 1, title: "Incident", description: "", severity: "minor",
-          status: "investigating", affectedServices: "[]",
-          createdAt: "2026-03-01", updatedAt: "2026-03-01", resolvedAt: null,
-        }),
-        all: vi.fn().mockResolvedValue({ results: [] }),
-        run: runMock,
-        raw: vi.fn().mockResolvedValue([]),
-      };
-      return stmt as unknown as D1PreparedStatement;
+    mockD1ForIncidents(env, {
+      firstResult: {
+        id: 1, title: "Incident", description: "", severity: "minor",
+        status: "investigating", affectedServices: "[]",
+        createdAt: "2026-03-01", updatedAt: "2026-03-01", resolvedAt: null,
+        tenantId: TEST_TENANT.id,
+      },
     });
 
     const res = await app.request("/api/incidents/1", {
@@ -383,12 +432,7 @@ describe("PUT /api/incidents/:id (admin)", () => {
     }, env);
 
     expect(res.status).toBe(200);
-    // Verify bind was called with a non-null resolvedAt (7th arg)
-    const bindCalls = runMock.mock.instances.map((_, i) => {
-      const stmt = vi.mocked(env.STATUS_DB.prepare).mock.results[i]?.value;
-      return stmt;
-    });
-    // The UPDATE statement's bind should have resolvedAt set
+    // Verify the UPDATE query includes resolved_at
     const updateCalls = vi.mocked(env.STATUS_DB.prepare).mock.calls;
     const updateQuery = updateCalls.find((c) => (c[0] as string).includes("UPDATE"));
     expect(updateQuery).toBeDefined();
@@ -400,6 +444,7 @@ describe("PUT /api/incidents/:id (admin)", () => {
         id: 1, title: "Incident", description: "", severity: "minor",
         status: "resolved", affectedServices: "[]",
         createdAt: "2026-03-01", updatedAt: "2026-03-01", resolvedAt: "2026-03-02",
+        tenantId: TEST_TENANT.id,
       },
     });
 
@@ -427,6 +472,8 @@ describe("PUT /api/incidents/:id (admin)", () => {
   });
 
   it("returns 400 for invalid incident ID", async () => {
+    mockD1ForIncidents(env);
+
     const res = await app.request("/api/incidents/abc", {
       method: "PUT",
       headers: { ...AUTH_HEADER, "Content-Type": "application/json" },
@@ -437,6 +484,8 @@ describe("PUT /api/incidents/:id (admin)", () => {
   });
 
   it("returns 400 for invalid severity in update", async () => {
+    mockD1ForIncidents(env);
+
     const res = await app.request("/api/incidents/1", {
       method: "PUT",
       headers: { ...AUTH_HEADER, "Content-Type": "application/json" },
@@ -447,6 +496,8 @@ describe("PUT /api/incidents/:id (admin)", () => {
   });
 
   it("returns 400 for invalid JSON body", async () => {
+    mockD1ForIncidents(env);
+
     const res = await app.request("/api/incidents/1", {
       method: "PUT",
       headers: { ...AUTH_HEADER, "Content-Type": "application/json" },
@@ -461,7 +512,8 @@ describe("DELETE /api/incidents/:id (admin)", () => {
   let env: Env;
   let app: Hono<{ Bindings: Env }>;
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    TEST_API_KEY_HASH = await computeHash(TEST_API_KEY);
     env = createMockEnv();
     const setup = createApp(env);
     app = setup.app;
@@ -506,6 +558,8 @@ describe("DELETE /api/incidents/:id (admin)", () => {
   });
 
   it("returns 400 for invalid incident ID", async () => {
+    mockD1ForIncidents(env);
+
     const res = await app.request("/api/incidents/abc", {
       method: "DELETE",
       headers: AUTH_HEADER,
@@ -519,7 +573,8 @@ describe("POST /api/incidents/:id/updates (admin)", () => {
   let env: Env;
   let app: Hono<{ Bindings: Env }>;
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    TEST_API_KEY_HASH = await computeHash(TEST_API_KEY);
     env = createMockEnv();
     const setup = createApp(env);
     app = setup.app;
@@ -565,6 +620,8 @@ describe("POST /api/incidents/:id/updates (admin)", () => {
   });
 
   it("returns 400 when message is missing", async () => {
+    mockD1ForIncidents(env);
+
     const res = await app.request("/api/incidents/1/updates", {
       method: "POST",
       headers: { ...AUTH_HEADER, "Content-Type": "application/json" },
@@ -575,6 +632,8 @@ describe("POST /api/incidents/:id/updates (admin)", () => {
   });
 
   it("returns 400 when status is missing", async () => {
+    mockD1ForIncidents(env);
+
     const res = await app.request("/api/incidents/1/updates", {
       method: "POST",
       headers: { ...AUTH_HEADER, "Content-Type": "application/json" },
@@ -585,6 +644,8 @@ describe("POST /api/incidents/:id/updates (admin)", () => {
   });
 
   it("returns 400 for invalid status value in update", async () => {
+    mockD1ForIncidents(env);
+
     const res = await app.request("/api/incidents/1/updates", {
       method: "POST",
       headers: { ...AUTH_HEADER, "Content-Type": "application/json" },
@@ -595,6 +656,8 @@ describe("POST /api/incidents/:id/updates (admin)", () => {
   });
 
   it("returns 400 for invalid JSON body", async () => {
+    mockD1ForIncidents(env);
+
     const res = await app.request("/api/incidents/1/updates", {
       method: "POST",
       headers: { ...AUTH_HEADER, "Content-Type": "application/json" },
@@ -605,6 +668,8 @@ describe("POST /api/incidents/:id/updates (admin)", () => {
   });
 
   it("returns 400 for invalid incident ID", async () => {
+    mockD1ForIncidents(env);
+
     const res = await app.request("/api/incidents/abc/updates", {
       method: "POST",
       headers: { ...AUTH_HEADER, "Content-Type": "application/json" },

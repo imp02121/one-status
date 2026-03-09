@@ -1,12 +1,15 @@
 /**
- * RSS feed endpoint
+ * RSS feed endpoint (tenant-scoped)
  *
  * GET /rss — Returns an RSS 2.0 XML feed of recent incidents.
  */
 import { Hono } from "hono";
-import type { Env, Incident } from "../types";
+import type { Env, Incident, Tenant } from "../types";
 
-export const rssRoutes = new Hono<{ Bindings: Env }>();
+export const rssRoutes = new Hono<{
+  Bindings: Env;
+  Variables: { tenant: Tenant };
+}>();
 
 function escapeXml(str: string): string {
   return str
@@ -17,11 +20,13 @@ function escapeXml(str: string): string {
     .replace(/'/g, "&apos;");
 }
 
-/** GET /rss — RSS 2.0 feed of recent incidents */
+/** GET /rss — RSS 2.0 feed of recent incidents (scoped by tenant) */
 rssRoutes.get("/rss", async (c) => {
+  const tenant = c.get("tenant");
   const rows = await c.env.STATUS_DB.prepare(
-    "SELECT * FROM status_incidents ORDER BY created_at DESC LIMIT 50",
+    "SELECT * FROM status_incidents WHERE tenant_id = ? ORDER BY created_at DESC LIMIT 50",
   )
+    .bind(tenant.id)
     .all<Incident>();
 
   const pageUrl = c.env.STATUS_PAGE_URL || "https://status.bundlenudge.com";

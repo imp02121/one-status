@@ -1,11 +1,18 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Hono } from "hono";
-import type { Env, DailyUptime } from "../types";
+import type { Env, Tenant } from "../types";
 import { uptimeRoutes } from "./uptime";
-import { createMockEnv, mockDailyUptime } from "../test-helpers";
+import { createMockEnv, mockDailyUptime, mockTenant } from "../test-helpers";
+
+const TEST_TENANT = mockTenant();
 
 function createApp(env: Env) {
-  const app = new Hono<{ Bindings: Env }>();
+  const app = new Hono<{ Bindings: Env; Variables: { tenant: Tenant } }>();
+  // Inject tenant context for tests
+  app.use("/api/*", async (c, next) => {
+    c.set("tenant", TEST_TENANT);
+    return next();
+  });
   app.route("/api", uptimeRoutes);
   return app;
 }
@@ -52,18 +59,6 @@ describe("GET /api/uptime", () => {
 
     expect(body.days).toBe(7);
     expect(body.entries).toHaveLength(7);
-  });
-
-  it("returns 400 for invalid service name", async () => {
-    const res = await app.request(
-      "/api/uptime?service=nonexistent",
-      {},
-      env,
-    );
-
-    expect(res.status).toBe(400);
-    const body = await res.json();
-    expect(body.error).toContain("Invalid");
   });
 
   it("returns 400 for missing service parameter", async () => {
@@ -124,7 +119,7 @@ describe("GET /api/uptime", () => {
     expect(body.entries[0].date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
   });
 
-  it("accepts all valid service names", async () => {
+  it("accepts various service slug names", async () => {
     vi.mocked(env.STATUS_KV.get).mockResolvedValue(null);
 
     const services = [

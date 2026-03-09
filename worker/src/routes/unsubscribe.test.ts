@@ -1,11 +1,18 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Hono } from "hono";
-import type { Env } from "../types";
+import type { Env, Tenant } from "../types";
 import { unsubscribeRoutes } from "./unsubscribe";
-import { createMockEnv } from "../test-helpers";
+import { createMockEnv, mockTenant } from "../test-helpers";
+
+const TEST_TENANT = mockTenant();
 
 function createApp(env: Env) {
-  const app = new Hono<{ Bindings: Env }>();
+  const app = new Hono<{ Bindings: Env; Variables: { tenant: Tenant } }>();
+  // Inject tenant context for tests
+  app.use("/api/*", async (c, next) => {
+    c.set("tenant", TEST_TENANT);
+    return next();
+  });
   app.route("/api", unsubscribeRoutes);
   return app;
 }

@@ -1,15 +1,69 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { Hono } from "hono";
-import type { Env, OverallStatus, LatestStatus } from "../types";
-import { KV_KEYS, SERVICE_NAMES } from "../types";
+import type { Env, Tenant } from "../types";
+import { KV_KEYS } from "../types";
 import { statusRoutes } from "./status";
-import { createMockEnv, mockOverallStatus, mockLatestStatus } from "../test-helpers";
+import { createMockEnv, mockOverallStatus, mockTenant } from "../test-helpers";
+
+const TEST_TENANT = mockTenant();
+
+// SHA-256 hash of "test-api-key" — pre-computed for test mocking
+const TEST_API_KEY = "test-api-key";
+let TEST_API_KEY_HASH: string;
+
+async function computeHash(token: string): Promise<string> {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(token);
+  const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+  const hashArray = new Uint8Array(hashBuffer);
+  return Array.from(hashArray)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
 
 function createApp(env: Env) {
-  const app = new Hono<{ Bindings: Env }>();
+  const app = new Hono<{ Bindings: Env; Variables: { tenant: Tenant } }>();
+  // Inject tenant context for tests
+  app.use("/api/*", async (c, next) => {
+    c.set("tenant", TEST_TENANT);
+    return next();
+  });
   app.route("/api", statusRoutes);
   return { app, env };
 }
+
+/**
+ * Mock D1 that handles api_keys lookups for requireApiKey middleware.
+ */
+function mockD1ForApiKey(env: Env) {
+  vi.mocked(env.STATUS_DB.prepare).mockImplementation((query: string) => {
+    const stmt = {
+      bind: vi.fn().mockReturnThis(),
+      first: vi.fn().mockImplementation(async () => {
+        if (query.includes("api_keys")) {
+          return {
+            id: "key-1",
+            tenant_id: TEST_TENANT.id,
+            name: "Test Key",
+            key_hash: TEST_API_KEY_HASH,
+            key_prefix: "test",
+            scopes: '["status:write"]',
+            last_used_at: null,
+            expires_at: null,
+            created_at: "2026-01-01T00:00:00Z",
+          };
+        }
+        return null;
+      }),
+      all: vi.fn().mockResolvedValue({ results: [] }),
+      run: vi.fn().mockResolvedValue({ success: true, meta: { changes: 1 } }),
+      raw: vi.fn().mockResolvedValue([]),
+    };
+    return stmt as unknown as D1PreparedStatement;
+  });
+}
+
+const AUTH_HEADER = { Authorization: `Bearer ${TEST_API_KEY}` };
 
 describe("GET /api/status", () => {
   let env: Env;
@@ -24,7 +78,7 @@ describe("GET /api/status", () => {
   it("returns 200 with overall status from KV", async () => {
     const overall = mockOverallStatus();
     vi.mocked(env.STATUS_KV.get)
-      .mockResolvedValueOnce(null) // status:message
+      .mockResolvedValueOnce(null) // tenant message
       .mockResolvedValueOnce(JSON.stringify(overall));
 
     const res = await app.request("/api/status", {}, env);
@@ -39,7 +93,7 @@ describe("GET /api/status", () => {
   it("returns all 7 service statuses when overall is present", async () => {
     const overall = mockOverallStatus();
     vi.mocked(env.STATUS_KV.get)
-      .mockResolvedValueOnce(null) // status:message
+      .mockResolvedValueOnce(null) // tenant message
       .mockResolvedValueOnce(JSON.stringify(overall));
 
     const res = await app.request("/api/status", {}, env);
@@ -55,29 +109,7 @@ describe("GET /api/status", () => {
     expect(body.services["documentation"]).toBe("operational");
   });
 
-  it("falls back to individual service statuses when overall KV is empty", async () => {
-    // First call returns null for overall
-    vi.mocked(env.STATUS_KV.get).mockImplementation(async (key: string) => {
-      if (key === KV_KEYS.overall) return null;
-      // Return individual service status
-      if (key.startsWith("health:")) {
-        const service = key.replace("health:", "").replace(":latest", "");
-        return JSON.stringify(
-          mockLatestStatus(service as any, { status: "operational" }),
-        );
-      }
-      return null;
-    });
-
-    const res = await app.request("/api/status", {}, env);
-    const body = await res.json();
-
-    expect(res.status).toBe(200);
-    expect(body.status).toBe("unknown");
-    expect(body.services).toBeDefined();
-  });
-
-  it("returns null for services with no KV data in fallback mode", async () => {
+  it("returns unknown status when tenant overall KV is empty", async () => {
     vi.mocked(env.STATUS_KV.get).mockResolvedValue(null);
 
     const res = await app.request("/api/status", {}, env);
@@ -85,9 +117,17 @@ describe("GET /api/status", () => {
 
     expect(res.status).toBe(200);
     expect(body.status).toBe("unknown");
-    for (const service of SERVICE_NAMES) {
-      expect(body.services[service]).toBeNull();
-    }
+    expect(body.services).toEqual({});
+  });
+
+  it("returns null for services when no KV data", async () => {
+    vi.mocked(env.STATUS_KV.get).mockResolvedValue(null);
+
+    const res = await app.request("/api/status", {}, env);
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.status).toBe("unknown");
   });
 
   it("includes updatedAt timestamp in fallback response", async () => {
@@ -122,7 +162,7 @@ describe("GET /api/status", () => {
       },
     });
     vi.mocked(env.STATUS_KV.get)
-      .mockResolvedValueOnce(null) // status:message
+      .mockResolvedValueOnce(null) // tenant message
       .mockResolvedValueOnce(JSON.stringify(overall));
 
     const res = await app.request("/api/status", {}, env);
@@ -133,19 +173,19 @@ describe("GET /api/status", () => {
     expect(body.services["edge-delivery"]).toBe("down");
   });
 
-  it("reads from KV with the correct key", async () => {
+  it("reads from KV with the tenant-scoped key", async () => {
     vi.mocked(env.STATUS_KV.get).mockResolvedValue(null);
 
     await app.request("/api/status", {}, env);
 
-    expect(env.STATUS_KV.get).toHaveBeenCalledWith(KV_KEYS.overall);
+    expect(env.STATUS_KV.get).toHaveBeenCalledWith(KV_KEYS.tenantOverall(TEST_TENANT.id));
   });
 
-  it("includes message when status:message is set in KV", async () => {
+  it("includes message when tenant message is set in KV", async () => {
     const message = { text: "Scheduled maintenance tonight", updatedAt: "2026-03-08T12:00:00.000Z" };
     const overall = mockOverallStatus();
     vi.mocked(env.STATUS_KV.get)
-      .mockResolvedValueOnce(JSON.stringify(message)) // status:message
+      .mockResolvedValueOnce(JSON.stringify(message)) // tenant message
       .mockResolvedValueOnce(JSON.stringify(overall)); // overall
 
     const res = await app.request("/api/status", {}, env);
@@ -155,10 +195,10 @@ describe("GET /api/status", () => {
     expect(body.message).toEqual(message);
   });
 
-  it("has null message when status:message is not set", async () => {
+  it("has null message when tenant message is not set", async () => {
     const overall = mockOverallStatus();
     vi.mocked(env.STATUS_KV.get)
-      .mockResolvedValueOnce(null) // status:message
+      .mockResolvedValueOnce(null) // tenant message
       .mockResolvedValueOnce(JSON.stringify(overall));
 
     const res = await app.request("/api/status", {}, env);
@@ -173,10 +213,12 @@ describe("PUT /api/status/message", () => {
   let env: Env;
   let app: Hono<{ Bindings: Env }>;
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    TEST_API_KEY_HASH = await computeHash(TEST_API_KEY);
     env = createMockEnv();
     const setup = createApp(env);
     app = setup.app;
+    mockD1ForApiKey(env);
   });
 
   it("stores message with valid auth and valid text", async () => {
@@ -184,7 +226,7 @@ describe("PUT /api/status/message", () => {
       method: "PUT",
       headers: {
         "Content-Type": "application/json",
-        Authorization: "Bearer test-admin-key-secret",
+        ...AUTH_HEADER,
       },
       body: JSON.stringify({ text: "Scheduled maintenance" }),
     }, env);
@@ -193,7 +235,7 @@ describe("PUT /api/status/message", () => {
     const body = await res.json();
     expect(body.success).toBe(true);
     expect(env.STATUS_KV.put).toHaveBeenCalledWith(
-      "status:message",
+      KV_KEYS.tenantMessage(TEST_TENANT.id),
       expect.stringContaining("Scheduled maintenance"),
     );
   });
@@ -230,7 +272,7 @@ describe("PUT /api/status/message", () => {
       method: "PUT",
       headers: {
         "Content-Type": "application/json",
-        Authorization: "Bearer test-admin-key-secret",
+        ...AUTH_HEADER,
       },
       body: JSON.stringify({ text: "" }),
     }, env);
@@ -245,7 +287,7 @@ describe("PUT /api/status/message", () => {
       method: "PUT",
       headers: {
         "Content-Type": "application/json",
-        Authorization: "Bearer test-admin-key-secret",
+        ...AUTH_HEADER,
       },
       body: JSON.stringify({ text: "a".repeat(501) }),
     }, env);
@@ -260,7 +302,7 @@ describe("PUT /api/status/message", () => {
       method: "PUT",
       headers: {
         "Content-Type": "application/json",
-        Authorization: "Bearer test-admin-key-secret",
+        ...AUTH_HEADER,
       },
       body: "not json{{{",
     }, env);
@@ -275,13 +317,13 @@ describe("PUT /api/status/message", () => {
       method: "PUT",
       headers: {
         "Content-Type": "application/json",
-        Authorization: "Bearer test-admin-key-secret",
+        ...AUTH_HEADER,
       },
       body: JSON.stringify({ text: "  trimmed  " }),
     }, env);
 
     const putCalls = vi.mocked(env.STATUS_KV.put).mock.calls.filter(
-      (call) => call[0] === "status:message",
+      (call) => (call[0] as string) === KV_KEYS.tenantMessage(TEST_TENANT.id),
     );
     expect(putCalls.length).toBe(1);
     const stored = JSON.parse(putCalls[0][1] as string);
@@ -293,13 +335,13 @@ describe("PUT /api/status/message", () => {
       method: "PUT",
       headers: {
         "Content-Type": "application/json",
-        Authorization: "Bearer test-admin-key-secret",
+        ...AUTH_HEADER,
       },
       body: JSON.stringify({ text: "Maintenance" }),
     }, env);
 
     const putCalls = vi.mocked(env.STATUS_KV.put).mock.calls.filter(
-      (call) => call[0] === "status:message",
+      (call) => (call[0] as string) === KV_KEYS.tenantMessage(TEST_TENANT.id),
     );
     const stored = JSON.parse(putCalls[0][1] as string);
     expect(stored.updatedAt).toBeDefined();
@@ -311,24 +353,24 @@ describe("DELETE /api/status/message", () => {
   let env: Env;
   let app: Hono<{ Bindings: Env }>;
 
-  beforeEach(() => {
+  beforeEach(async () => {
+    TEST_API_KEY_HASH = await computeHash(TEST_API_KEY);
     env = createMockEnv();
     const setup = createApp(env);
     app = setup.app;
+    mockD1ForApiKey(env);
   });
 
   it("deletes message with valid auth", async () => {
     const res = await app.request("/api/status/message", {
       method: "DELETE",
-      headers: {
-        Authorization: "Bearer test-admin-key-secret",
-      },
+      headers: AUTH_HEADER,
     }, env);
 
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.success).toBe(true);
-    expect(env.STATUS_KV.delete).toHaveBeenCalledWith("status:message");
+    expect(env.STATUS_KV.delete).toHaveBeenCalledWith(KV_KEYS.tenantMessage(TEST_TENANT.id));
   });
 
   it("returns 401 without Authorization header", async () => {
